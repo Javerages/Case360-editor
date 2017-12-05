@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         Case360 script editor
 // @namespace    http://tampermonkey.net/
-// @version      0.2
+// @version      0.3
 // @author       P. Wasilewski
 // @collaborator B. Bergs
+// @collaborator J. Elsen
 // @description  Try to take over the world and make it a better place!
 // @match        */sonora/Admin?op=i
 // @supportURL   https://github.com/pwasilewski/Case360-editor
@@ -17,7 +18,7 @@
 // @grant        GM_registerMenuCommand
 // ==/UserScript==
 
-const ACE_CONFIG = '{"id":"GM_config","title":"Case360 script editor config","fields":{"theme":{"label":"Theme","type":"select","default":"piwi","options":["ambiance","chaos","chrome","clouds","clouds_midnight","cobalt","crimson_editor","dawn","dracula","dreamweaver","eclipse","github","gob","gruvbox","idle_fingers","iplastic","katzenmilch","kr_theme","kuroir","merbivore","merbivore_soft","monokai","mono_industrial","notepad","pastel_on_dark","piwi","solarized_dark","solarized_light","sqlserver","terminal","textmate","tomorrow","tomorrow_night","tomorrow_night_blue","tomorrow_night_bright","tomorrow_night_eighties","twilight","vibrant_ink","xcode"]},"hline":{"label":"Show horizontal line","type":"checkbox","default":true}}}';
+const ACE_CONFIG = '{"id":"GM_config","title":"Case360 script editor config","fields":{"repository":{"label":"Ace repository","type":"text","default":"ace/"},"theme":{"label":"Theme","type":"select","default":"piwi","options":["ambiance","chaos","chrome","clouds","clouds_midnight","cobalt","crimson_editor","dawn","dracula","dreamweaver","eclipse","github","gob","gruvbox","idle_fingers","iplastic","katzenmilch","kr_theme","kuroir","merbivore","merbivore_soft","monokai","mono_industrial","notepad","pastel_on_dark","piwi","solarized_dark","solarized_light","sqlserver","terminal","textmate","tomorrow","tomorrow_night","tomorrow_night_blue","tomorrow_night_bright","tomorrow_night_eighties","twilight","vibrant_ink","xcode"]},"hline":{"label":"Show horizontal line","type":"checkbox","default":true}}}';
 
 GM_config.init($.parseJSON (ACE_CONFIG));
 
@@ -29,13 +30,14 @@ const CASE_EDITOR_ID          = "Script";
 const CASE_EDITOR_SELECTOR    = "#" + CASE_EDITOR_ID;
 const URL_AJAX_COMPILE_SCRIPT = "CaseAjax?method=ScriptsHelper.compileScript";
 
-const ACE_CDN_URL             = "ace/ace.js";
+const ACE_REPOSITORY          = GM_config.get("repository");
+const ACE_CDN_URL             = ACE_REPOSITORY + "ace.js";
+const ACE_LANG_CDN_URL        = ACE_REPOSITORY + "ext-language_tools.js";
 const ACE_EDITOR_ID           = "editor";
 const ACE_EDITOR_SELECTOR     = "#" + ACE_EDITOR_ID;
 const ACE_MODE                = "ace/mode/case";
 const ACE_THEME               = "ace/theme/" + GM_config.get("theme");
 
-var done = false;
 var scriptName = "";
 var editor;
 var ace_loaded = false;
@@ -63,7 +65,6 @@ function GM_getCompileResults(objRequestHttp) {
 function GM_showCompileResults(responseXML) {
     if (responseXML !== null) {
         var errorMsg = responseXML.getElementsByTagName("errormsg");
-        o_compileResults = document.getElementById("compileResults");
         var errorNode = errorMsg.item(0).firstChild;
         if (errorNode !== null) {
             var offsetPos = errorNode.nodeValue.lastIndexOf("near offset ");
@@ -126,7 +127,7 @@ function GM_appendAceScript() {
 function GM_appendAutoCompleteScript() {
     if($("script[src$='ext-language_tools.js']").length === 0) {
         var ace_lang      = document.createElement('script');
-            ace_lang.src  = "ace/ext-language_tools.js";
+            ace_lang.src  = ACE_LANG_CDN_URL;
             ace_lang.type = 'text/javascript';
             ace_lang.onload = function() {
                 autocomplete_loaded = true;
@@ -141,6 +142,7 @@ function GM_initializeEditor() {
         GM_EDITOR.id    = ACE_EDITOR_ID;
     $(GM_EDITOR).insertBefore(CASE_EDITOR_SELECTOR);
 
+    var langTools = ace.require("ace/ext/language_tools");
     editor = ace.edit(ACE_EDITOR_ID);
     editor.getSession().setMode(ACE_MODE);
     editor.setTheme(ACE_THEME);
@@ -174,10 +176,52 @@ function GM_initializeEditor() {
         compileScript();
         GM_compileScript();
     });
+
+    langTools.addCompleter(scriptsCompleter);
 }
 
+var scriptsCompleter = {
+    getCompletions: function(editor, session, pos, prefix, callback) {
+        if (prefix.length === 0) { callback(null, []); return ;}
+        if(prefix.split(".") < 2) {
+            return;
+        }
+
+        prefix = prefix.substring(0, prefix.lastIndexOf("."));
+
+        $.ajax({
+            type: "GET",
+            url: "CaseAjax?getmethods=" + prefix,
+            dataType: "xml",
+            success: function(xml){
+                var completers = [];
+                if($(xml).find("responseXML").length == 1) {
+                    $(xml).find("class").each(function(){
+                        $(this).children().each(function(){
+                            var method		= prefix + "." + $(this).text();
+                            var methodName 	= method.split('(')[0];
+                            var args		= method.match(/\((.*?)\)/)[1];
+
+                            simplifiedMethod = getSimplifiedMethodFormat(methodName, args);
+                            snippetMethod = getSnippetMethodFormat(methodName, args);
+                            completers.push({definition : simplifiedMethod, value : simplifiedMethod, snippet: snippetMethod, score : 1000, meta : 'method', type: 'method'});
+                        });
+                    });
+                }
+
+                callback(null, completers); return ;
+            }
+        });
+    },
+    getDocTooltip: function(item) {
+        if (item.type == 'method' && !item.docHTML) {
+            item.docHTML = "<b>" + item.definition + "</b>";
+        }
+    }
+};
+
 $('#rightpane').bind('DOMSubtreeModified', function() {
-    script = $('#scriptlocation').val();
+    var script = $('#scriptlocation').val();
     if($(CASE_EDITOR_SELECTOR).length !== 0 && scriptName != script) {
 
         scriptName = script;
@@ -187,3 +231,55 @@ $('#rightpane').bind('DOMSubtreeModified', function() {
         GM_wait();
     }
 });
+
+/**
+ * Function to format the list of params and remove useless extension.
+ *
+ * E.g.: TST.updateActor(Object.PropertyManager.RepositoryObject.FormData actorFormdata, Object.PropertyManager.FmsRow updatedRow)
+ *
+ * @param {String} methodName The method name (e.g.: TST.updateActor)
+ * @param {String} argumentsString The list of arguments (e.g.: Object.PropertyManager.RepositoryObject.FormData actorFormdata, Object.PropertyManager.FmsRow updatedRow)
+ *
+ * @return {String} The format string. (e.g.: TST.updateActor(FormData actorFormdata, FmsRow updatedRow))
+ */
+function getSimplifiedMethodFormat(methodName, argumentsString) {
+    var result = [];
+    var simplified = [];
+    var args = argumentsString.split(",");
+
+    $.each( args, function( index, value ) {
+        var splitedArg = value.match(/(.+)\s+(.+)/);
+        if(splitedArg !== null) {
+            simplified.push(splitedArg[1].split('.').pop() + ' ' + splitedArg[2]);
+        }
+    });
+
+    result.push(methodName, "(", simplified.join(", ") ,")");
+    return result.join("");
+}
+
+/**
+ * Function to format the list of params allowing snippets and remove useless extension.
+ *
+ * E.g.: TST.updateActor(Object.PropertyManager.RepositoryObject.FormData actorFormdata, Object.PropertyManager.FmsRow updatedRow)
+ *
+ * @param {String} methodName The method name (e.g.: TST.updateActor)
+ * @param {String} argumentsString The list of arguments (e.g.: Object.PropertyManager.RepositoryObject.FormData actorFormdata, Object.PropertyManager.FmsRow updatedRow)
+ *
+ * @return {String} The format string. (e.g.: TST.updateActor(${1:actorFormdata}, ${2:updatedRow}))
+ */
+function getSnippetMethodFormat(methodName, argumentsString) {
+    var result = [];
+    var snippet = [];
+    var args = argumentsString.split(",");
+
+    $.each( args, function( index, value ) {
+        var splitedArg = value.match(/(.+)\s+(.+)/);
+        if(splitedArg !== null) {
+            snippet.push('${' + (index+1) + ':' + splitedArg[2] + '}');
+        }
+    });
+
+    result.push(methodName, "(", snippet.join(", ") ,")");
+    return result.join("");
+}
